@@ -20,11 +20,11 @@ fun signingValue(propKey: String, envKey: String): String? =
     keystoreProps.getProperty(propKey) ?: System.getenv(envKey)
 
 android {
-    namespace = "com.steamcontroller.android"
+    namespace = "com.virtualcontroller.android"
     compileSdk = 35
 
     defaultConfig {
-        applicationId = "com.steamcontroller.android"
+        applicationId = "com.virtualcontroller.android"
         minSdk = 26
         targetSdk = 35
         versionCode = 3

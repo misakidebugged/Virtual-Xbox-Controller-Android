@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <string name="app_name">Steam Controller</string>
+    <string name="app_name">Virtual Controller</string>
     <string name="status_disconnected">Controller disconnected</string>
     <string name="status_connected">Controller connected</string>
     <string name="status_running">Controller active</string>
@@ -13,7 +13,7 @@
 
     <string name="help_dialog_title">Switching connection modes</string>
     <string name="notification_channel_name">Controller Service</string>
-    <string name="notification_title">Steam Controller</string>
+    <string name="notification_title">Virtual Controller</string>
     <string name="notification_text">Starting…</string>
     <string name="notif_mode_uinput">Emulating %1$s</string>
     <string name="notif_mode_inject">Fallback: Shizuku inject (limited)</string>
@@ -21,7 +21,7 @@
     <string name="notif_starting">Connecting…</string>
 
     <!-- ━━━━━━━━━━━━ MainActivity ━━━━━━━━━━━━ -->
-    <string name="main_title">Steam Controller</string>
+    <string name="main_title">Virtual Controller</string>
     <string name="main_subtitle">for Android via Shizuku</string>
     <string name="main_subtitle_tv">for Android TV via Shizuku</string>
     <string name="main_open_github_desc">Open GitHub repository</string>

@@ -1,2 +1,2 @@
 -keep class rikka.shizuku.** { *; }
--keep class com.steamcontroller.android.** { *; }
+-keep class com.virtualcontroller.android.** { *; }

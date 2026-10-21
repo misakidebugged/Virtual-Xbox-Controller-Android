@@ -125,7 +125,7 @@ static int write_event(int fd, uint16_t type, uint16_t code, int32_t value) {
 }
 
 extern "C" JNIEXPORT jboolean JNICALL
-Java_com_steamcontroller_android_uinput_UInputNative_canOpen(JNIEnv*, jclass) {
+Java_com_virtualcontroller_android_uinput_UInputNative_canOpen(JNIEnv*, jclass) {
     int fd = open("/dev/uinput", O_WRONLY | O_NONBLOCK);
     if (fd < 0) {
         LOGI("canOpen: /dev/uinput open denied: %s", strerror(errno));
@@ -274,7 +274,7 @@ static void destroy_devices() {
 }
 
 extern "C" JNIEXPORT jboolean JNICALL
-Java_com_steamcontroller_android_uinput_UInputNative_createDevice(JNIEnv*, jclass, jint profileId) {
+Java_com_virtualcontroller_android_uinput_UInputNative_createDevice(JNIEnv*, jclass, jint profileId) {
     const gamepad_profile* prof = find_profile(profileId);
     LOGI("createDevice: profile=%d (VID=0x%04X PID=0x%04X name=\"%s\")",
          prof->id, prof->vid, prof->pid, prof->name);
@@ -362,7 +362,7 @@ fail:
 }
 
 extern "C" JNIEXPORT void JNICALL
-Java_com_steamcontroller_android_uinput_UInputNative_sendFrame(
+Java_com_virtualcontroller_android_uinput_UInputNative_sendFrame(
         JNIEnv*, jclass,
         jint buttons,
         jint lx, jint ly, jint rx, jint ry,
@@ -404,7 +404,7 @@ Java_com_steamcontroller_android_uinput_UInputNative_sendFrame(
 // Returns: jintArray of size 2 [strongMagnitude, weakMagnitude] (each 0..65535),
 //          or null if no rumble event is pending.
 extern "C" JNIEXPORT jintArray JNICALL
-Java_com_steamcontroller_android_uinput_UInputNative_pollFFEvent(JNIEnv* env, jclass) {
+Java_com_virtualcontroller_android_uinput_UInputNative_pollFFEvent(JNIEnv* env, jclass) {
     if (g_fd_gamepad < 0) return nullptr;
 
     struct input_event ev;
@@ -486,7 +486,7 @@ Java_com_steamcontroller_android_uinput_UInputNative_pollFFEvent(JNIEnv* env, jc
 // if the mouse fd reports every frame (300Hz), Android keeps the cursor "active" and
 // routes DPAD events to it instead of the focused IME view.
 extern "C" JNIEXPORT void JNICALL
-Java_com_steamcontroller_android_uinput_UInputNative_sendMouseFrame(
+Java_com_virtualcontroller_android_uinput_UInputNative_sendMouseFrame(
         JNIEnv*, jclass, jint relX, jint relY, jint scrollY, jint keys) {
     // Bit 16/17/18 of `keys` = BTN_LEFT/RIGHT/MIDDLE; bits 0..MOUSE_KEY_COUNT-1 = keyboard keys.
     const int mouse_bits = keys & ((1 << 16) | (1 << 17) | (1 << 18));
@@ -524,7 +524,7 @@ Java_com_steamcontroller_android_uinput_UInputNative_sendMouseFrame(
 }
 
 extern "C" JNIEXPORT void JNICALL
-Java_com_steamcontroller_android_uinput_UInputNative_destroy(JNIEnv*, jclass) {
+Java_com_virtualcontroller_android_uinput_UInputNative_destroy(JNIEnv*, jclass) {
     destroy_devices();
     LOGI("Virtual devices destroyed");
 }
@@ -952,7 +952,7 @@ static void evdev_reader_thread_func() {
 }
 
 extern "C" JNIEXPORT void JNICALL
-Java_com_steamcontroller_android_uinput_UInputNative_startEvdevReader(
+Java_com_virtualcontroller_android_uinput_UInputNative_startEvdevReader(
         JNIEnv* env, jclass, jobject listener, jstring deviceFilter) {
     stop_evdev_reader_internal();
 
@@ -972,7 +972,7 @@ Java_com_steamcontroller_android_uinput_UInputNative_startEvdevReader(
 }
 
 extern "C" JNIEXPORT void JNICALL
-Java_com_steamcontroller_android_uinput_UInputNative_stopEvdevReader(JNIEnv*, jclass) {
+Java_com_virtualcontroller_android_uinput_UInputNative_stopEvdevReader(JNIEnv*, jclass) {
     stop_evdev_reader_internal();
     LOGI("stopEvdevReader stopped");
 }
