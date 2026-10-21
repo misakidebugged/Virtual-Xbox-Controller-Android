@@ -12,6 +12,13 @@
 #include <string.h>
 #include <errno.h>
 #include <time.h>
+#include <dirent.h>
+#include <atomic>
+#include <thread>
+#include <vector>
+#include <string>
+#include <algorithm>
+#include <poll.h>
 
 #define LOG_TAG "uinput_jni"
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO,  LOG_TAG, __VA_ARGS__)
@@ -521,3 +528,452 @@ Java_com_steamcontroller_android_uinput_UInputNative_destroy(JNIEnv*, jclass) {
     destroy_devices();
     LOGI("Virtual devices destroyed");
 }
+
+// ─── Native Evdev Reader for Generic Bluetooth Controllers ───────────────────
+
+static JavaVM* g_jvm = nullptr;
+static jobject g_listener_ref = nullptr;
+static std::atomic<bool> g_evdev_running{false};
+static std::thread g_evdev_thread;
+static std::string g_target_device_filter = "ANY";
+
+JNIEXPORT jint JNI_OnLoad(JavaVM* vm, void*) {
+    g_jvm = vm;
+    return JNI_VERSION_1_6;
+}
+
+static void stop_evdev_reader_internal() {
+    g_evdev_running.store(false);
+    if (g_evdev_thread.joinable()) {
+        g_evdev_thread.join();
+    }
+    if (g_listener_ref && g_jvm) {
+        JNIEnv* env = nullptr;
+        if (g_jvm->GetEnv((void**)&env, JNI_VERSION_1_6) == JNI_OK && env) {
+            env->DeleteGlobalRef(g_listener_ref);
+        }
+        g_listener_ref = nullptr;
+    }
+}
+
+static bool contains_ic(const std::string& haystack, const std::string& needle) {
+    if (needle.empty() || needle == "ANY") return true;
+    std::string h_clean = haystack;
+    std::string n_clean = needle;
+    h_clean.erase(std::remove(h_clean.begin(), h_clean.end(), ':'), h_clean.end());
+    n_clean.erase(std::remove(n_clean.begin(), n_clean.end(), ':'), n_clean.end());
+
+    auto it = std::search(
+        h_clean.begin(), h_clean.end(),
+        n_clean.begin(), n_clean.end(),
+        [](char c1, char c2) {
+            return std::tolower(static_cast<unsigned char>(c1)) ==
+                   std::tolower(static_cast<unsigned char>(c2));
+        }
+    );
+    if (it != h_clean.end()) return true;
+
+    auto it_raw = std::search(
+        haystack.begin(), haystack.end(),
+        needle.begin(), needle.end(),
+        [](char c1, char c2) {
+            return std::tolower(static_cast<unsigned char>(c1)) ==
+                   std::tolower(static_cast<unsigned char>(c2));
+        }
+    );
+    return it_raw != haystack.end();
+}
+
+static int32_t scale_axis(int32_t val, int32_t srcMin, int32_t srcMax, int32_t dstMin, int32_t dstMax) {
+    if (srcMax <= srcMin) return dstMin;
+    float norm = (float)(val - srcMin) / (float)(srcMax - srcMin);
+    norm = std::max(0.0f, std::min(1.0f, norm));
+    return dstMin + (int32_t)(norm * (float)(dstMax - dstMin));
+}
+
+static void evdev_reader_thread_func() {
+    JNIEnv* env = nullptr;
+    if (!g_jvm || g_jvm->AttachCurrentThread(&env, nullptr) != JNI_OK || !env) {
+        LOGE("evdev_reader: AttachCurrentThread failed");
+        return;
+    }
+
+    jclass listenerClass = env->GetObjectClass(g_listener_ref);
+    if (!listenerClass) {
+        LOGE("evdev_reader: GetObjectClass failed");
+        g_jvm->DetachCurrentThread();
+        return;
+    }
+    jmethodID onFrameMethod = env->GetMethodID(listenerClass, "onInputFrame", "([B)V");
+    if (!onFrameMethod) {
+        LOGE("evdev_reader: GetMethodID onInputFrame failed");
+        g_jvm->DetachCurrentThread();
+        return;
+    }
+
+    struct EvdevFd {
+        int fd;
+        std::string path;
+        std::string name;
+        struct input_absinfo abs_x{};
+        struct input_absinfo abs_y{};
+        struct input_absinfo abs_rx{};
+        struct input_absinfo abs_ry{};
+        struct input_absinfo abs_z{};
+        struct input_absinfo abs_rz{};
+        struct input_absinfo abs_brake{};
+        struct input_absinfo abs_gas{};
+        bool has_rx{false};
+        bool has_ry{false};
+    };
+
+    std::vector<EvdevFd> open_fds;
+
+    uint32_t cur_buttons = 0;
+    int16_t cur_lx = 0, cur_ly = 0, cur_rx = 0, cur_ry = 0;
+    uint16_t cur_lt = 0, cur_rt = 0;
+    uint8_t seq = 0;
+
+    auto send_report = [&]() {
+        uint8_t report[40] = {0};
+        report[0] = 0x45; // REPORT_STATE
+        report[1] = seq++;
+
+        report[2] = (uint8_t)(cur_buttons & 0xFF);
+        report[3] = (uint8_t)((cur_buttons >> 8) & 0xFF);
+        report[4] = (uint8_t)((cur_buttons >> 16) & 0xFF);
+        report[5] = (uint8_t)((cur_buttons >> 24) & 0xFF);
+
+        report[6] = (uint8_t)(cur_lt & 0xFF);
+        report[7] = (uint8_t)((cur_lt >> 8) & 0xFF);
+        report[8] = (uint8_t)(cur_rt & 0xFF);
+        report[9] = (uint8_t)((cur_rt >> 8) & 0xFF);
+
+        report[10] = (uint8_t)(cur_lx & 0xFF);
+        report[11] = (uint8_t)((cur_lx >> 8) & 0xFF);
+        report[12] = (uint8_t)(cur_ly & 0xFF);
+        report[13] = (uint8_t)((cur_ly >> 8) & 0xFF);
+        report[14] = (uint8_t)(cur_rx & 0xFF);
+        report[15] = (uint8_t)((cur_rx >> 8) & 0xFF);
+        report[16] = (uint8_t)(cur_ry & 0xFF);
+        report[17] = (uint8_t)((cur_ry >> 8) & 0xFF);
+
+        jbyteArray jarr = env->NewByteArray(40);
+        if (jarr) {
+            env->SetByteArrayRegion(jarr, 0, 40, (const jbyte*)report);
+            env->CallVoidMethod(g_listener_ref, onFrameMethod, jarr);
+            env->DeleteLocalRef(jarr);
+        }
+    };
+
+    auto rescan_devices = [&]() {
+        for (auto it = open_fds.begin(); it != open_fds.end(); ) {
+            if (it->fd < 0) {
+                it = open_fds.erase(it);
+            } else {
+                ++it;
+            }
+        }
+
+        DIR* dir = opendir("/dev/input");
+        if (!dir) return;
+
+        struct dirent* entry;
+        while ((entry = readdir(dir)) != nullptr) {
+            if (strncmp(entry->d_name, "event", 5) != 0) continue;
+
+            std::string path = std::string("/dev/input/") + entry->d_name;
+
+            bool already_open = false;
+            for (const auto& dev : open_fds) {
+                if (dev.path == path) { already_open = true; break; }
+            }
+            if (already_open) continue;
+
+            int fd = open(path.c_str(), O_RDWR | O_NONBLOCK);
+            if (fd < 0) fd = open(path.c_str(), O_RDONLY | O_NONBLOCK);
+            if (fd < 0) continue;
+
+            char dev_name[256] = "Unknown";
+            char dev_uniq[256] = "";
+            ioctl(fd, EVIOCGNAME(sizeof(dev_name) - 1), dev_name);
+            ioctl(fd, EVIOCGUNIQ(sizeof(dev_uniq) - 1), dev_uniq);
+
+            std::string name_str(dev_name);
+            std::string uniq_str(dev_uniq);
+
+            if (name_str.find("Steam Controller") != std::string::npos ||
+                name_str.find("Microsoft X-Box") != std::string::npos ||
+                name_str.find("Sony Interactive") != std::string::npos ||
+                name_str.find("uinput") != std::string::npos) {
+                close(fd);
+                continue;
+            }
+
+            uint8_t evtype_bitmask[EV_MAX / 8 + 1] = {0};
+            if (ioctl(fd, EVIOCGBIT(0, sizeof(evtype_bitmask)), evtype_bitmask) < 0) {
+                close(fd);
+                continue;
+            }
+            bool has_key = (evtype_bitmask[EV_KEY / 8] & (1 << (EV_KEY % 8))) != 0;
+            bool has_abs = (evtype_bitmask[EV_ABS / 8] & (1 << (EV_ABS % 8))) != 0;
+            if (!has_key && !has_abs) {
+                close(fd);
+                continue;
+            }
+
+            if (g_target_device_filter != "ANY") {
+                bool match_uniq = !uniq_str.empty() && contains_ic(uniq_str, g_target_device_filter);
+                bool match_name = !name_str.empty() && contains_ic(name_str, g_target_device_filter);
+                if (!match_uniq && !match_name) {
+                    close(fd);
+                    continue;
+                }
+            }
+
+            if (ioctl(fd, EVIOCGRAB, 1) == 0) {
+                LOGI("EVIOCGRAB success on %s (\"%s\") - input grabbed exclusively", path.c_str(), name_str.c_str());
+            } else {
+                LOGI("EVIOCGRAB non-fatal warning on %s (\"%s\"): %s", path.c_str(), name_str.c_str(), strerror(errno));
+            }
+
+            EvdevFd dev;
+            dev.fd = fd;
+            dev.path = path;
+            dev.name = name_str;
+
+            uint8_t abs_bitmask[ABS_MAX / 8 + 1] = {0};
+            ioctl(fd, EVIOCGBIT(EV_ABS, sizeof(abs_bitmask)), abs_bitmask);
+            dev.has_rx = (abs_bitmask[ABS_RX / 8] & (1 << (ABS_RX % 8))) != 0;
+            dev.has_ry = (abs_bitmask[ABS_RY / 8] & (1 << (ABS_RY % 8))) != 0;
+
+            if (ioctl(fd, EVIOCGABS(ABS_X), &dev.abs_x) < 0) dev.abs_x = {0, -32768, 32767, 0, 0, 0};
+            if (ioctl(fd, EVIOCGABS(ABS_Y), &dev.abs_y) < 0) dev.abs_y = {0, -32768, 32767, 0, 0, 0};
+            if (ioctl(fd, EVIOCGABS(ABS_RX), &dev.abs_rx) < 0) dev.abs_rx = {0, -32768, 32767, 0, 0, 0};
+            if (ioctl(fd, EVIOCGABS(ABS_RY), &dev.abs_ry) < 0) dev.abs_ry = {0, -32768, 32767, 0, 0, 0};
+            if (ioctl(fd, EVIOCGABS(ABS_Z), &dev.abs_z) < 0) dev.abs_z = {0, 0, 255, 0, 0, 0};
+            if (ioctl(fd, EVIOCGABS(ABS_RZ), &dev.abs_rz) < 0) dev.abs_rz = {0, 0, 255, 0, 0, 0};
+            ioctl(fd, EVIOCGABS(ABS_BRAKE), &dev.abs_brake);
+            ioctl(fd, EVIOCGABS(ABS_GAS), &dev.abs_gas);
+
+            LOGI("evdev_reader opened: %s (\"%s\") fd=%d", path.c_str(), name_str.c_str(), fd);
+            open_fds.push_back(dev);
+            send_report();
+        }
+        closedir(dir);
+    };
+
+    rescan_devices();
+
+    uint64_t last_rescan_ms = 0;
+    uint64_t last_stream_ms = 0;
+
+    while (g_evdev_running.load()) {
+        struct timespec ts;
+        clock_gettime(CLOCK_MONOTONIC, &ts);
+        uint64_t now_ms = (uint64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+
+        if (open_fds.empty() || (now_ms - last_rescan_ms) > 2000) {
+            rescan_devices();
+            last_rescan_ms = now_ms;
+        }
+
+        if (open_fds.empty()) {
+            struct timespec req = {0, 100 * 1000 * 1000};
+            nanosleep(&req, nullptr);
+            continue;
+        }
+
+        std::vector<struct pollfd> pfds;
+        for (const auto& dev : open_fds) {
+            struct pollfd pfd;
+            pfd.fd = dev.fd;
+            pfd.events = POLLIN;
+            pfd.revents = 0;
+            pfds.push_back(pfd);
+        }
+
+        int poll_res = poll(pfds.data(), (nfds_t)pfds.size(), 10);
+        bool state_changed = false;
+
+        if (poll_res > 0) {
+            for (size_t i = 0; i < pfds.size(); i++) {
+                if (!(pfds[i].revents & POLLIN)) {
+                    if (pfds[i].revents & (POLLERR | POLLHUP | POLLNVAL)) {
+                        ioctl(open_fds[i].fd, EVIOCGRAB, 0);
+                        close(open_fds[i].fd);
+                        open_fds[i].fd = -1;
+                    }
+                    continue;
+                }
+
+                struct input_event evs[32];
+                ssize_t rd = read(open_fds[i].fd, evs, sizeof(evs));
+                if (rd < (ssize_t)sizeof(struct input_event)) {
+                    if (rd < 0 && (errno == EAGAIN || errno == EINTR)) continue;
+                    ioctl(open_fds[i].fd, EVIOCGRAB, 0);
+                    close(open_fds[i].fd);
+                    open_fds[i].fd = -1;
+                    continue;
+                }
+
+                size_t count = rd / sizeof(struct input_event);
+                auto& dev = open_fds[i];
+
+                for (size_t k = 0; k < count; k++) {
+                    const auto& ev = evs[k];
+
+                    if (ev.type == EV_KEY) {
+                        uint32_t mask = 0;
+                        switch (ev.code) {
+                            case BTN_SOUTH: case 288: mask = 0x00000001; break; // A / BTN_TRIGGER / BTN_SOUTH
+                            case BTN_EAST:  case 289: mask = 0x00000002; break; // B / BTN_THUMB / BTN_EAST
+                            case BTN_NORTH: case 290: case 306: mask = 0x00000004; break; // X / BTN_THUMB2 / BTN_C / BTN_NORTH
+                            case BTN_WEST:  case 291: case 309: mask = 0x00000008; break; // Y / BTN_TOP / BTN_Z / BTN_WEST
+                            case BTN_TL:    case 292: mask = 0x00080000; break; // LB / BTN_TOP2 / BTN_TL
+                            case BTN_TR:    case 293: mask = 0x00000200; break; // RB / BTN_PINKIE / BTN_TR
+                            case BTN_TL2:   case 294: mask = 0x08000000; break; // LT_FULL / BTN_BASE / BTN_TL2
+                            case BTN_TR2:   case 295: mask = 0x00800000; break; // RT_FULL / BTN_BASE2 / BTN_TR2
+                            case BTN_SELECT:case 296: case 158: mask = 0x00004000; break; // VIEW / BTN_BASE3 / BTN_SELECT / KEY_BACK
+                            case BTN_START: case 297: case 28:  mask = 0x00000040; break; // MENU / BTN_BASE4 / BTN_START / KEY_ENTER
+                            case BTN_MODE:  case 172: mask = 0x00010000; break; // STEAM / GUIDE / BTN_MODE / KEY_HOMEPAGE
+                            case BTN_THUMBL:case 298: mask = 0x00008000; break; // LS / BTN_BASE5 / BTN_THUMBL
+                            case BTN_THUMBR:case 299: mask = 0x00000020; break; // RS / BTN_BASE6 / BTN_THUMBR
+                            case KEY_UP: case 544:    mask = 0x00002000; break; // DPAD_UP
+                            case KEY_DOWN: case 545:  mask = 0x00000400; break; // DPAD_DOWN
+                            case KEY_LEFT: case 546:  mask = 0x00001000; break; // DPAD_LEFT
+                            case KEY_RIGHT: case 547: mask = 0x00000800; break; // DPAD_RIGHT
+                            default: break;
+                        }
+
+                        if (mask != 0) {
+                            if (ev.value) cur_buttons |= mask;
+                            else cur_buttons &= ~mask;
+                            state_changed = true;
+                        }
+                    } else if (ev.type == EV_ABS) {
+                        switch (ev.code) {
+                            case ABS_X:
+                                cur_lx = (int16_t)scale_axis(ev.value, dev.abs_x.minimum, dev.abs_x.maximum, -32767, 32767);
+                                state_changed = true;
+                                break;
+                            case ABS_Y: {
+                                int32_t s = scale_axis(ev.value, dev.abs_y.minimum, dev.abs_y.maximum, -32767, 32767);
+                                cur_ly = (int16_t)(-s);
+                                state_changed = true;
+                                break;
+                            }
+                            case ABS_RX:
+                                cur_rx = (int16_t)scale_axis(ev.value, dev.abs_rx.minimum, dev.abs_rx.maximum, -32767, 32767);
+                                state_changed = true;
+                                break;
+                            case ABS_RY: {
+                                int32_t s = scale_axis(ev.value, dev.abs_ry.minimum, dev.abs_ry.maximum, -32767, 32767);
+                                cur_ry = (int16_t)(-s);
+                                state_changed = true;
+                                break;
+                            }
+                            case ABS_Z:
+                                if (!dev.has_rx) {
+                                    cur_rx = (int16_t)scale_axis(ev.value, dev.abs_z.minimum, dev.abs_z.maximum, -32767, 32767);
+                                } else {
+                                    cur_lt = (uint16_t)scale_axis(ev.value, dev.abs_z.minimum, dev.abs_z.maximum, 0, 32767);
+                                    if (cur_lt > 16384) cur_buttons |= 0x08000000; else cur_buttons &= ~0x08000000;
+                                }
+                                state_changed = true;
+                                break;
+                            case ABS_RZ:
+                                if (!dev.has_ry) {
+                                    int32_t s = scale_axis(ev.value, dev.abs_rz.minimum, dev.abs_rz.maximum, -32767, 32767);
+                                    cur_ry = (int16_t)(-s);
+                                } else {
+                                    cur_rt = (uint16_t)scale_axis(ev.value, dev.abs_rz.minimum, dev.abs_rz.maximum, 0, 32767);
+                                    if (cur_rt > 16384) cur_buttons |= 0x00800000; else cur_buttons &= ~0x00800000;
+                                }
+                                state_changed = true;
+                                break;
+                            case ABS_BRAKE:
+                                cur_lt = (uint16_t)scale_axis(ev.value, dev.abs_brake.minimum, dev.abs_brake.maximum, 0, 32767);
+                                if (cur_lt > 16384) cur_buttons |= 0x08000000; else cur_buttons &= ~0x08000000;
+                                state_changed = true;
+                                break;
+                            case ABS_GAS:
+                                cur_rt = (uint16_t)scale_axis(ev.value, dev.abs_gas.minimum, dev.abs_gas.maximum, 0, 32767);
+                                if (cur_rt > 16384) cur_buttons |= 0x00800000; else cur_buttons &= ~0x00800000;
+                                state_changed = true;
+                                break;
+                            case ABS_HAT0X:
+                                if (ev.value < 0) {
+                                    cur_buttons |= 0x00001000;  // DPAD_LEFT
+                                    cur_buttons &= ~0x00000800; // DPAD_RIGHT
+                                } else if (ev.value > 0) {
+                                    cur_buttons |= 0x00000800;  // DPAD_RIGHT
+                                    cur_buttons &= ~0x00001000; // DPAD_LEFT
+                                } else {
+                                    cur_buttons &= ~(0x00001000 | 0x00000800);
+                                }
+                                state_changed = true;
+                                break;
+                            case ABS_HAT0Y:
+                                if (ev.value < 0) {
+                                    cur_buttons |= 0x00002000;  // DPAD_UP
+                                    cur_buttons &= ~0x00000400; // DPAD_DOWN
+                                } else if (ev.value > 0) {
+                                    cur_buttons |= 0x00000400;  // DPAD_DOWN
+                                    cur_buttons &= ~0x00002000; // DPAD_UP
+                                } else {
+                                    cur_buttons &= ~(0x00002000 | 0x00000400);
+                                }
+                                state_changed = true;
+                                break;
+                            default: break;
+                        } // switch ev.code
+                    } // else if EV_ABS
+                } // for k
+            } // for i
+        } // if poll_res > 0
+
+        // Stream state every ~10ms (100Hz) when active or on state change
+        if (state_changed || (now_ms - last_stream_ms) >= 10) {
+            send_report();
+            last_stream_ms = now_ms;
+        }
+    } // while g_evdev_running
+
+    for (auto& dev : open_fds) {
+        if (dev.fd >= 0) {
+            ioctl(dev.fd, EVIOCGRAB, 0);
+            close(dev.fd);
+        }
+    }
+    open_fds.clear();
+
+    g_jvm->DetachCurrentThread();
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_com_steamcontroller_android_uinput_UInputNative_startEvdevReader(
+        JNIEnv* env, jclass, jobject listener, jstring deviceFilter) {
+    stop_evdev_reader_internal();
+
+    if (!listener) return;
+    g_listener_ref = env->NewGlobalRef(listener);
+    if (deviceFilter) {
+        const char* str = env->GetStringUTFChars(deviceFilter, nullptr);
+        g_target_device_filter = str ? str : "ANY";
+        if (str) env->ReleaseStringUTFChars(deviceFilter, str);
+    } else {
+        g_target_device_filter = "ANY";
+    }
+
+    g_evdev_running.store(true);
+    g_evdev_thread = std::thread(evdev_reader_thread_func);
+    LOGI("startEvdevReader started (filter=\"%s\")", g_target_device_filter.c_str());
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_com_steamcontroller_android_uinput_UInputNative_stopEvdevReader(JNIEnv*, jclass) {
+    stop_evdev_reader_internal();
+    LOGI("stopEvdevReader stopped");
+}
+

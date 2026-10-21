@@ -145,10 +145,27 @@ class UInputService : IUInputService.Stub {
     }
 
     override fun destroy() {
+        try { UInputNative.stopEvdevReader() } catch (_: Throwable) {}
         try { UInputNative.destroy() } catch (t: Throwable) {
             Log.e(TAG, "destroy native failed: ${t.message}")
         }
         // Shizuku contract: destroy() must terminate the process
         System.exit(0)
+    }
+
+    override fun startEvdevReader(listener: com.steamcontroller.android.ipc.IInputEventListener?, deviceAddressOrName: String?) {
+        try {
+            UInputNative.startEvdevReader(listener, deviceAddressOrName ?: "ANY")
+        } catch (t: Throwable) {
+            Log.e(TAG, "startEvdevReader failed: ${t.message}")
+        }
+    }
+
+    override fun stopEvdevReader() {
+        try {
+            UInputNative.stopEvdevReader()
+        } catch (t: Throwable) {
+            Log.e(TAG, "stopEvdevReader failed: ${t.message}")
+        }
     }
 }

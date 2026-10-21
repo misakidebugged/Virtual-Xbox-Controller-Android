@@ -232,9 +232,8 @@ class MainActivity : ComponentActivity() {
                             onTransport = ::onTransportPicked,
                             profile = profile,
                             onProfile = ::onProfilePicked,
-                            btDevices = pairedBtDevices.map { dev ->
-                                // Show just the friendly name; the address is what gets saved.
-                                dev.address to ((try { dev.name } catch (_: SecurityException) { null }) ?: "Unknown")
+                            btDevices = listOf("ANY" to getString(R.string.main_bt_any_device)) + pairedBtDevices.map { dev ->
+                                dev.address to ((try { dev.name } catch (_: SecurityException) { null }) ?: dev.address)
                             },
                             btAddress = btAddress,
                             onBtDevice = { address ->
@@ -358,14 +357,11 @@ class MainActivity : ComponentActivity() {
             Toast.makeText(this, "Enable Bluetooth first", Toast.LENGTH_SHORT).show()
             return
         }
-        pairedBtDevices = BluetoothHidManager(this).listPairedSteamControllers()
-        if (pairedBtDevices.isEmpty()) {
-            log("No Steam Controller paired — pair via Android Bluetooth settings first")
-            return
+        pairedBtDevices = BluetoothHidManager(this).listPairedBluetoothControllers()
+        if (btAddress == null) {
+            btAddress = "ANY"
+            Prefs.setBluetoothAddress(this, "ANY")
         }
-        val saved = pairedBtDevices.firstOrNull { it.address == btAddress } ?: pairedBtDevices.first()
-        btAddress = saved.address
-        Prefs.setBluetoothAddress(this, saved.address)
     }
 
     private fun requestNotificationPermissionIfNeeded() {
@@ -405,8 +401,7 @@ class MainActivity : ComponentActivity() {
 
     private fun startBluetoothService() {
         if (Prefs.getBluetoothAddress(this) == null) {
-            Toast.makeText(this, "Select a paired Bluetooth device first", Toast.LENGTH_LONG).show()
-            return
+            Prefs.setBluetoothAddress(this, "ANY")
         }
         startForegroundService(Intent(this, ControllerService::class.java))
         // Don't fake "connected" here — stateFlow will flip it once a real HID frame lands.

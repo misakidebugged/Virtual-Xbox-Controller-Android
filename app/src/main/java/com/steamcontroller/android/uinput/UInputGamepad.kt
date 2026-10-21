@@ -442,4 +442,20 @@ class UInputGamepad(private val context: Context, initialProfile: GamepadProfile
             Log.e(TAG, "sendMouseFrame IPC failed: ${t.message}")
         }
     }
+
+    fun startEvdevReader(listener: com.steamcontroller.android.ipc.IInputEventListener, deviceFilter: String?) {
+        try {
+            service?.startEvdevReader(listener, deviceFilter)
+        } catch (t: Throwable) {
+            Log.e(TAG, "startEvdevReader failed: ${t.message}")
+        }
+    }
+
+    fun stopEvdevReader() {
+        try {
+            service?.stopEvdevReader()
+        } catch (t: Throwable) {
+            Log.e(TAG, "stopEvdevReader failed: ${t.message}")
+        }
+    }
 }

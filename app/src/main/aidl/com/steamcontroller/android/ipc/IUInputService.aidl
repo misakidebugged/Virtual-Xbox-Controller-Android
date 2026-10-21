@@ -7,6 +7,8 @@
 // fails with "illegal unicode escape". Renaming the segment removes the sequence.
 package com.steamcontroller.android.ipc;
 
+import com.steamcontroller.android.ipc.IInputEventListener;
+
 interface IUInputService {
     boolean canCreateDevice();
 
@@ -36,4 +38,8 @@ interface IUInputService {
     String runShellCommandForOutput(in String[] cmd);
 
     void destroy();
+
+    void startEvdevReader(IInputEventListener listener, String deviceAddressOrName);
+
+    void stopEvdevReader();
 }

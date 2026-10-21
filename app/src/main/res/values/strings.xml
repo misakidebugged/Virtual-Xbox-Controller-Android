@@ -42,6 +42,8 @@
     <string name="main_gamepad_ds4">DualShock 4</string>
     <string name="main_gamepad_dualsense">DualSense</string>
     <string name="main_bt_device_hint">Bluetooth device</string>
+    <string name="main_bt_any_device">Any Connected Bluetooth Controller</string>
+    <string name="main_bt_subtitle">Steam Controller, Xbox, PlayStation, 8BitDo, or Generic</string>
     <string name="main_refresh_bt_desc">Refresh paired devices</string>
     <string name="main_action_calibration_title">Calibration</string>
     <string name="main_action_calibration_desc">Calibrate sticks and rumble</string>

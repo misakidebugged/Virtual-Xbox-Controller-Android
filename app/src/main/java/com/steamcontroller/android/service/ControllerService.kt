@@ -392,48 +392,60 @@ class ControllerService : Service() {
         return true
     }
 
+    private val inputEventListener = object : com.steamcontroller.android.ipc.IInputEventListener.Stub() {
+        override fun onInputFrame(report: ByteArray?) {
+            if (report == null || report.isEmpty()) return
+            val state = SteamReportParser.parse(report) ?: SteamReportParser.parseRaw(report)
+            onHidFrame(state, report)
+        }
+    }
+
     private fun initBluetooth(): Boolean {
         if (!btManager.isBluetoothAvailable) {
             Log.e(TAG, "Bluetooth disabled or unavailable")
             return false
         }
         val address = Prefs.getBluetoothAddress(this)
-        if (address == null) {
-            Log.e(TAG, "No paired Bluetooth Steam Controller selected")
-            return false
+
+        if (address == null || address == "ANY") {
+            Log.i(TAG, "Starting Evdev reader for Any Bluetooth Controller")
+            uinput.startEvdevReader(inputEventListener, "ANY")
+            return true
         }
+
         val mgr = getSystemService(BluetoothManager::class.java)
         val device = try {
             mgr?.adapter?.getRemoteDevice(address)
         } catch (t: Throwable) {
             Log.e(TAG, "Invalid BT address $address: ${t.message}")
-            return false
-        }
-        if (device == null) {
-            Log.e(TAG, "No remote device for $address")
-            return false
+            null
         }
 
-        btManager.connect(
-            device,
-            onReport = { raw ->
-                val state = SteamReportParser.parse(raw) ?: SteamReportParser.parseRaw(raw)
-                onHidFrame(state, raw)
-            },
-            onConnectionChange = { connected ->
-                Log.i(TAG, "BT connection state: $connected")
-                // Controller switched off or out of range: drop the virtual pad like a real
-                // one being unplugged. AutoLaunchReceiver brings us back on reconnection.
-                if (!connected) stopSelf()
-            }
-        )
+        if (device != null && btManager.isSteamController(device)) {
+            Log.i(TAG, "Connecting to Steam Controller via Valve GATT service (${device.address})")
+            btManager.connect(
+                device,
+                onReport = { raw ->
+                    val state = SteamReportParser.parse(raw) ?: SteamReportParser.parseRaw(raw)
+                    onHidFrame(state, raw)
+                },
+                onConnectionChange = { connected ->
+                    Log.i(TAG, "BT connection state: $connected")
+                    if (!connected) stopSelf()
+                }
+            )
 
-        heartbeatJob = scope.launch(Dispatchers.IO) {
-            while (isActive) {
-                delay(SteamCommands.KEEPALIVE_INTERVAL_MS)
-                btManager.sendHeartbeat()
+            heartbeatJob = scope.launch(Dispatchers.IO) {
+                while (isActive) {
+                    delay(SteamCommands.KEEPALIVE_INTERVAL_MS)
+                    btManager.sendHeartbeat()
+                }
             }
+        } else {
+            Log.i(TAG, "Starting Evdev reader for Bluetooth Controller (address=$address)")
+            uinput.startEvdevReader(inputEventListener, address)
         }
+
         return true
     }
 
@@ -602,6 +614,7 @@ class ControllerService : Service() {
 
     override fun onDestroy() {
         unregisterReceiver(usbDetachReceiver)
+        try { uinput.stopEvdevReader() } catch (_: Throwable) {}
         try { uinput.unbind() } catch (_: Throwable) {}
         scope.cancel()
         reader?.stop()

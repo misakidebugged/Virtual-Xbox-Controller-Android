@@ -87,6 +87,27 @@ class BluetoothHidManager(private val context: Context) {
         }
     }
 
+    fun isSteamController(device: BluetoothDevice): Boolean {
+        val n = try { device.name } catch (_: SecurityException) { null } ?: return false
+        return NAME_HINTS.any { hint -> n.contains(hint, ignoreCase = true) }
+    }
+
+    fun listPairedBluetoothControllers(): List<BluetoothDevice> {
+        val a = adapter ?: return emptyList()
+        return try {
+            val bonded = a.bondedDevices.orEmpty().toList()
+            bonded.sortedWith(compareByDescending<BluetoothDevice> { isSteamController(it) }
+                .thenByDescending { dev ->
+                    val name = (try { dev.name } catch (_: SecurityException) { null }) ?: ""
+                    listOf("Xbox", "Wireless Controller", "Controller", "Gamepad", "8BitDo", "DualSense", "DualShock", "Pro Controller")
+                        .any { name.contains(it, ignoreCase = true) }
+                })
+        } catch (t: SecurityException) {
+            Log.e(TAG, "Missing BLUETOOTH_CONNECT: ${t.message}")
+            emptyList()
+        }
+    }
+
     fun connect(
         device: BluetoothDevice,
         onReport: (ByteArray) -> Unit,

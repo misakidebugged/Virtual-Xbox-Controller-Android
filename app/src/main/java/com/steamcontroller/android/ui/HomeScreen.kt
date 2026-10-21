@@ -164,7 +164,7 @@ private fun ConnectionSection(
         { ChoiceRow(stringResource(R.string.main_transport_usb), transport == Transport.USB, { onTransport(Transport.USB) },
             subtitle = "Wired cable or wireless Puck") },
         { ChoiceRow(stringResource(R.string.main_transport_bt), transport == Transport.BLUETOOTH, { onTransport(Transport.BLUETOOTH) },
-            subtitle = "Pair the controller in Android settings first") },
+            subtitle = stringResource(R.string.main_bt_subtitle)) },
     ))
     if (transport != Transport.BLUETOOTH) return
 
@@ -174,10 +174,10 @@ private fun ConnectionSection(
         }
     }
     if (btDevices.isEmpty()) {
-        SectionCard { SettingsRow("No paired Steam Controller found", subtitle = "Pair it in Android Bluetooth settings, then refresh.") }
+        SectionCard { SettingsRow("No paired Bluetooth controller found", subtitle = "Pair it in Android Bluetooth settings, then refresh.") }
     } else {
         DividedCard(btDevices.map { (address, label) ->
-            { ChoiceRow(label, address == btAddress, { onBtDevice(address) }) }
+            { ChoiceRow(label, address == btAddress || (btAddress == null && address == "ANY"), { onBtDevice(address) }) }
         })
     }
 }

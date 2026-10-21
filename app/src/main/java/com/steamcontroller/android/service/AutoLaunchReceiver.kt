@@ -27,7 +27,8 @@ class AutoLaunchReceiver : BroadcastReceiver() {
 
         @Suppress("DEPRECATION")
         val device: BluetoothDevice = intent.getParcelableExtra(BluetoothDevice.EXTRA_DEVICE) ?: return
-        if (!device.address.equals(Prefs.getBluetoothAddress(context), ignoreCase = true)) return
+        val savedAddr = Prefs.getBluetoothAddress(context)
+        if (savedAddr != null && savedAddr != "ANY" && !device.address.equals(savedAddr, ignoreCase = true)) return
 
         Log.i(TAG, "Selected controller connected, auto-launching service")
         try {
